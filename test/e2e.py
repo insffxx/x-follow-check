@@ -1,4 +1,4 @@
-"""v1.1 端到端：真实 Chromium 加载插件，合成 x.com 单页应用 + 合成 Following 接口。不访问真实 X。
+"""v1.3 端到端（含 v1.1 全部场景 + 场景 C 一键清理）：真实 Chromium 加载插件，合成 x.com 单页应用 + 合成 Following 接口。不访问真实 X。
 场景 A：接口可用 → 不滚动页面直接读完；第二次发现取关；「去取关」直接跳主页并高亮按钮，用户点后自动标已处理；「下一个」。
 场景 B：接口 404 → 自动改用滚动列表方式。
 """
@@ -11,7 +11,7 @@ CHROME = _found[-1] if _found else None  # None = Playwright's bundled Chromium
 N = 260
 QID = 'TESTqueryId_Following1'
 BEARER = 'AAAAAAAAAAAAAAAAAAAAAtestbearer' + 'x' * 60
-S = {'follows': {i for i in range(N) if i % 3 == 0}, 'unfollowed_by_me': set(), 'api_ok': True, 'api_calls': 0, 'need_feature': True, 'auth_ok': True}
+S = {'follows': {i for i in range(N) if i % 3 == 0}, 'unfollowed_by_me': set(), 'api_ok': True, 'api_calls': 0, 'need_feature': True, 'auth_ok': True, 'no_spam': {6}, 'acts': [], 'dialogs': []}
 
 MAINJS = 'var a={queryId:"%s",operationName:"Following",operationType:"query"};var b="%s";' % (QID, BEARER)
 
@@ -47,18 +47,45 @@ function following(main){
   }
   window.onscroll=render; render();
 }
+const PST={}; window.__NO_SPAM=new Set(__NOSPAM__);
+function act(p){ fetch('/__act/'+p); }
 function profile(main,i){
   setTimeout(()=>{ if(location.pathname!=='/u'+i) return;
-    const following=!GONE.has(i);
-    main.innerHTML='<div style="height:500px">banner</div><div data-testid="UserName"><span>User '+i+'</span><span>@u'+i+'</span></div><button id="fb" data-testid="'+(1000+i)+(following?'-unfollow':'-follow')+'">'+(following?'正在关注':'关注')+'</button>';
-    document.getElementById('fb').onclick=()=>{ if(!confirm('取消关注 @u'+i+'?')) return; GONE.add(i); fetch('/__unfollow/'+i); const b=document.getElementById('fb'); b.setAttribute('data-testid',(1000+i)+'-follow'); b.textContent='关注'; };
+    const st=PST[i]||(PST[i]={lists:i%2?['L1']:['L1','L2'],blocked:false});
+    const following=!GONE.has(i)&&!st.blocked;
+    const fbtn=st.blocked?'<button data-testid="'+(1000+i)+'-unblock">已屏蔽</button>':'<button id="fb" data-testid="'+(1000+i)+(following?'-unfollow':'-follow')+'">'+(following?'正在关注':'关注')+'</button>';
+    main.innerHTML='<div style="height:500px">banner</div><div data-testid="UserName"><span>User '+i+'</span><span>@u'+i+'</span></div>'+fbtn+'<button data-testid="userActions" aria-label="更多" id="more">…</button>';
+    const fb=document.getElementById('fb');
+    if(fb) fb.onclick=()=>{ if(!confirm('取消关注 @u'+i+'?')) return; GONE.add(i); fetch('/__unfollow/'+i); fb.setAttribute('data-testid',(1000+i)+'-follow'); fb.textContent='关注'; };
+    document.getElementById('more').onclick=()=>{
+      const m=document.createElement('div'); m.setAttribute('role','menu'); m.style.cssText='position:fixed;top:100px;right:320px;background:#fff;border:1px solid #ccc';
+      m.innerHTML='<div role="menuitem" id="mi-l">从列表中添加/移除 @u'+i+'</div><div role="menuitem" data-testid="block" id="mi-b">屏蔽 @u'+i+'</div><div role="menuitem" data-testid="report" id="mi-r">举报 @u'+i+'</div><div role="menuitem">复制链接</div>';
+      document.body.appendChild(m);
+      const close=()=>m.remove();
+      m.querySelector('#mi-l').onclick=()=>{ close(); const dl=document.createElement('div'); dl.setAttribute('role','dialog');
+        dl.innerHTML=['L1','L2','L3'].map(n=>'<div>'+n+'<div role="checkbox" aria-checked="'+st.lists.includes(n)+'" data-n="'+n+'">✓</div></div>').join('')+'<button>保存</button>';
+        dl.querySelectorAll('[role=checkbox]').forEach(c=>c.onclick=()=>c.setAttribute('aria-checked',c.getAttribute('aria-checked')==='true'?'false':'true'));
+        dl.querySelector('button').onclick=()=>{ st.lists=[...dl.querySelectorAll('[role=checkbox][aria-checked=true]')].map(c=>c.dataset.n); act('lists/'+i+'/'+st.lists.join(',')); dl.remove(); };
+        setTimeout(()=>document.body.appendChild(dl),300); };
+      m.querySelector('#mi-b').onclick=()=>{ close(); const sh=document.createElement('div'); sh.setAttribute('role','dialog');
+        sh.innerHTML='<div>屏蔽 @u'+i+'?</div><button data-testid="confirmationSheetConfirm">屏蔽</button><button data-testid="confirmationSheetCancel">取消</button>';
+        sh.querySelector('[data-testid=confirmationSheetConfirm]').onclick=()=>{ st.blocked=true; act('block/'+i); sh.remove(); setTimeout(()=>profile(main,i),0); };
+        document.body.appendChild(sh); };
+      m.querySelector('#mi-r').onclick=()=>{ close(); const dl=document.createElement('div'); dl.setAttribute('role','dialog');
+        const opts=window.__NO_SPAM.has(i)?['仇恨言论','其他']:['仇恨言论','垃圾信息','其他'];
+        dl.innerHTML='<h2>你为什么要举报</h2>'+opts.map(o=>'<label><input type="radio" name="r" value="'+o+'">'+o+'</label>').join('')+'<button data-testid="ChoiceSelectionNextButton" disabled>下一步</button>';
+        dl.querySelectorAll('input').forEach(r=>r.onchange=()=>{dl.querySelector('button').disabled=false;});
+        dl.querySelector('button').onclick=()=>{ const v=dl.querySelector('input:checked').value; dl.innerHTML='<div>感谢你的举报</div><button>完成</button>';
+          dl.querySelector('button').onclick=()=>{ act('report/'+i+'/'+encodeURIComponent(v)); dl.remove(); }; };
+        setTimeout(()=>document.body.appendChild(dl),400); };
+    };
   },400);
 }
 addEventListener('popstate',route); route();
 </script></body></html>"""
 
 def app_html():
-    return APP.replace('__N__', str(N)).replace('__F__', json.dumps(sorted(S['follows']))).replace('__G__', json.dumps(sorted(S['unfollowed_by_me'])))
+    return APP.replace('__N__', str(N)).replace('__F__', json.dumps(sorted(S['follows']))).replace('__G__', json.dumps(sorted(S['unfollowed_by_me']))).replace('__NOSPAM__', json.dumps(sorted(S['no_spam'])))
 
 def api_body(req_url):
     q = urllib.parse.parse_qs(urllib.parse.urlparse(req_url).query)
@@ -108,6 +135,8 @@ async def main():
                 if not S['api_ok'] or QID not in u: return await r.fulfill(status=404, body='')
                 st, body = api_body(u)
                 return await r.fulfill(status=st, content_type='application/json', body=body)
+            if u.startswith('https://x.com/__act/'):
+                S['acts'].append(urllib.parse.unquote(u.split('/__act/', 1)[1])); return await r.fulfill(status=200, body='ok')
             if u.startswith('https://x.com/__unfollow/'):
                 return await r.fulfill(status=200, body='ok')
             if re.match(r'https://x\.com/', u):
@@ -117,7 +146,13 @@ async def main():
         errors = []
         page = await ctx.new_page()
         page.on('pageerror', lambda e: errors.append(str(e)))
-        page.on('dialog', lambda d: asyncio.ensure_future(d.accept()))
+        def on_dialog(d):
+            S['dialogs'].append(d.message)
+            if S.get('reject_next'):
+                S['reject_next'] = False; asyncio.ensure_future(d.dismiss())
+            else:
+                asyncio.ensure_future(d.accept())
+        page.on('dialog', on_dialog)
         await page.goto('https://x.com/home')
         await page.wait_for_selector('#xfc-root', state='attached', timeout=15000)
         root = page.locator('#xfc-root')
@@ -179,6 +214,37 @@ async def main():
         unf = await root.locator('.row .hd2').all_inner_texts()
         check(len(unf) == 2 and any(x.startswith('@u3') for x in unf) and any(x.startswith('@u6') for x in unf), '取关名单是 u3/u6')
 
+
+        # 场景 C：取关了我 → 一键清理（移出列表 + 屏蔽 + 举报垃圾信息）
+        check(await root.locator('.row', has_text='@u3').locator('[data-a="clean"]').count() == 1, '取关名单每行有「一键清理」按钮')
+        await root.locator('.tab[data-t="nfb"]').click()
+        check(await root.locator('[data-a="clean"]').count() == 0, '「没回关我」名单不显示一键清理')
+        await root.locator('.tab[data-t="unf"]').click()
+        nd = len(S['dialogs'])
+        await root.locator('.row', has_text='@u3').locator('[data-a="clean"]').click()
+        for _ in range(80):
+            await asyncio.sleep(0.25)
+            if '已全部完成' in await root.locator('#curt').inner_text(): break
+        cur = await root.locator('#curt').inner_text(); print('  清理u3:', cur)
+        check(len(S['dialogs']) == nd + 1 and '屏蔽' in S['dialogs'][-1] and '举报' in S['dialogs'][-1], '动手前先弹确认框')
+        check('已全部完成' in cur and '已从你的 1 个列表中移除' in cur and '已屏蔽' in cur and '已举报为垃圾信息' in cur, '三步全部完成')
+        check(S['acts'][-3:] == ['lists/3/', 'block/3', 'report/3/垃圾信息'], 'X 页面收到：移出全部列表→屏蔽→举报选了垃圾信息 ' + str(S['acts']))
+        check('（1）' in await root.locator('#t-unf').inner_text(), '清理完自动标记已处理，取关计数减 1')
+        # C2：举报窗口里没有「垃圾信息」→ 停下交给你手动，不乱点、不标记已处理
+        n_acts = len(S['acts'])
+        await root.locator('.row', has_text='@u6').locator('[data-a="clean"]').click()
+        for _ in range(80):
+            await asyncio.sleep(0.25)
+            if '手动' in await root.locator('#curt').inner_text(): break
+        cur6 = await root.locator('#curt').inner_text(); print('  清理u6:', cur6)
+        check('没找到「垃圾信息」' in cur6 and '手动' in cur6 and await page.locator('[data-xfc-hl]').count() >= 1, '找不到垃圾信息选项时停下并红框标出举报窗口')
+        check(S['acts'][n_acts:] == ['lists/6/', 'block/6'] and not any(a.startswith('report/6') for a in S['acts']), '前两步完成、举报没有乱选 ' + str(S['acts'][n_acts:]))
+        check('（1）' in await root.locator('#t-unf').inner_text(), '没做完的不标记已处理')
+        # C3：确认框点取消 → 什么都不做
+        S['reject_next'] = True; n_acts = len(S['acts']); nd = len(S['dialogs'])
+        await root.locator('.row', has_text='@u6').locator('[data-a="clean"]').click()
+        await asyncio.sleep(3)
+        check(len(S['dialogs']) == nd + 1 and len(S['acts']) == n_acts, '确认框点取消就什么都不做')
         # 场景 B：接口失效 → 自动改用滚动
         S['api_ok'] = False
         await page.goto('https://x.com/home'); await page.wait_for_selector('#xfc-root', state='attached')
@@ -188,7 +254,7 @@ async def main():
         print('  扫描3:', prog3)
         check('已扫到列表底部' in prog3 and f'共关注 {N-1} 人' in prog3 and f'没回关你的 {N-1-(len(S["follows"]))} 人' in prog3, '接口不可用时自动改用滚动方式并扫完整')
         t3 = await root.locator('#t-nbv').inner_text()
-        check(f'（{sum(1 for i in range(N) if i % 4 and i != 250)}）' in t3, '滚动方式也能识别蓝V: ' + t3)
+        check(f'（{sum(1 for i in range(N) if i % 4 and i not in (250, 3))}）' in t3, '滚动方式也能识别蓝V（u3 已清理计入已处理）: ' + t3)
         check(not errors, '页面无报错 ' + str(errors))
         await page.evaluate("history.pushState({},'','/home'); dispatchEvent(new PopStateEvent('popstate'))")
         await asyncio.sleep(0.6)

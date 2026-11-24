@@ -1,6 +1,7 @@
 /* X 回关检查 · 页面面板
  * 扫描：优先直接读取 X 网页版自己用的「正在关注」数据（不用滚动页面）；读不到时自动改用滚动列表方式。
  * 定位：直接打开对方主页并高亮「正在关注」按钮，你自己点它取关；插件不会替你关注或取关任何人。
+ * 一键清理（仅「取关了我」）：确认后在对方主页依次点 X 自带的「从列表中添加/移除」「屏蔽」「举报→垃圾信息」，一次一人。
  */
 (() => {
   'use strict';
@@ -103,6 +104,8 @@
 .tag{display:inline-block;margin-left:4px;padding:0 6px;border-radius:6px;font-size:11px;background:#eff3f4;color:#536471}
 .sm{border:1px solid #cfd9de;background:#fff;border-radius:999px;padding:5px 10px;font-size:12px;cursor:pointer;white-space:nowrap;color:#0f1419}
 .sm.go{border-color:#f91880;color:#f91880;font-weight:600}
+.sm.cl{border-color:#f4212e;background:#f4212e;color:#fff;font-weight:600}
+.sm:disabled{opacity:.45;cursor:default}
 .empty{padding:28px 16px;text-align:center;color:#536471;font-size:13px;line-height:1.7}
 </style>
 <button class="fab" id="fab">回关检查</button>
@@ -199,7 +202,7 @@
       const cur = focus && focus.key === r.key;
       return `<div class="row${r.done ? ' done' : ''}${cur ? ' cur1' : ''}" data-k="${esc(r.key)}" data-d="${esc(r.doneKey)}" data-h="${esc(r.handle)}">
   <div class="who" data-a="go" title="打开主页"><div class="nm">${esc(r.name)}</div><div class="hd2">${esc(r.handle)}${tag}</div></div>
-  <button class="sm go" data-a="go">去取关</button>
+  ${ui.tab === 'unf' && !r.done ? '<button class="sm cl" data-a="clean" title="从你的列表中移除 + 屏蔽 + 举报为垃圾信息（会先让你确认）"' + (job && job.kind === 'clean' ? ' disabled' : '') + '>一键清理</button>' : '<button class="sm go" data-a="go">去取关</button>'}
   <button class="sm" data-a="done">${r.done ? '撤销' : '已处理'}</button>
 </div>`;
     }).join('');
@@ -208,6 +211,7 @@
   function renderFocus() {
     if (!focus) { $('cur').classList.remove('show'); return; }
     $('cur').classList.add('show');
+    if (focus.state === 'clean') { $('curt').innerHTML = `<b>${esc(focus.handle)}</b>：${focus.msg || ''}`; return; }
     const st = { wait: '正在打开主页…', ready: '已高亮他的<b>「正在关注」</b>按钮，点它并确认即可取关', unfollowed: '<b>已取关</b>，已自动标记为已处理', gone: '没找到「正在关注」按钮，可能你已经取关了他', fail: '主页没打开，请稍后再试' }[focus.state] || '';
     $('curt').innerHTML = `<b>${esc(focus.handle)}</b>：${st}`;
   }
@@ -433,6 +437,125 @@
     render();
   }
 
+  // ---------- 取关了我：一键 移出列表 + 屏蔽 + 举报垃圾信息 ----------
+  // 每次只处理一个人、点之前要你确认；用的是 X 自己主页「…」菜单里的同名功能，不调未公开接口、不批量。
+  // 任何一步在页面上找不到按钮就停下，把那一步留给你手动点（X 改版时不会乱点）。
+  const TX = {
+    lists: /从列表中添加\/移除|添加\/移除.*列表|Add\/remove .*Lists?/i,
+    block: /^屏蔽\s*@|^Block\s*@/i, report: /^举报\s*@|^Report\s*@/i,
+    spam: /垃圾信息|^Spam\b/i,
+    save: /^(保存|完成|Save|Done)$/i,
+    next: /^(下一步|下一个|提交|完成|Next|Submit|Done)$/i,
+  };
+  const vis = (el) => !!el && el.getClientRects().length > 0;
+  const txt = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  async function waitFor(fn, ms = 4000) { const t0 = Date.now(); for (;;) { const v = fn(); if (v) return v; if (Date.now() - t0 > ms) return null; await delay(150); } }
+  const byText = (root, sel, re) => [...root.querySelectorAll(sel)].find((el) => vis(el) && re.test(txt(el))) || null;
+  const topDialog = () => { const d = [...document.querySelectorAll('[role="dialog"]')].filter(vis); return d[d.length - 1] || null; };
+  const mainCol = () => document.querySelector('[data-testid="primaryColumn"]');
+  function closeLayer() {
+    const d = topDialog();
+    const x = d && (d.querySelector('[data-testid="app-bar-close"]') || byText(d, '[role="button"],button', /^(关闭|Close|取消|Cancel)$/i));
+    if (x) { x.click(); return; }
+    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+  }
+  async function menuItem(testid, re) {
+    const main = mainCol(); const more = main && main.querySelector('[data-testid="userActions"]');
+    if (!more) return null;
+    more.click();
+    const menu = await waitFor(() => [...document.querySelectorAll('[role="menu"]')].find(vis), 3000);
+    if (!menu) return null;
+    const it = (testid && menu.querySelector(`[data-testid="${testid}"]`)) || byText(menu, '[role="menuitem"]', re);
+    if (!it) closeLayer();
+    return it;
+  }
+  function hl(el) { if (!el) return; el.scrollIntoView({ block: 'center' }); el.setAttribute('data-xfc-hl', '1'); el.style.outline = '3px solid #f4212e'; el.style.outlineOffset = '2px'; }
+  const isBlocked = () => { const m = mainCol(); return !!(m && (m.querySelector('[data-testid$="-unblock"]') || byText(m, 'button,[role="button"]', /^(已屏蔽|Blocked)$/i))); };
+
+  async function stepLists() {
+    const it = await menuItem('', TX.lists);
+    if (!it) return { ok: false, msg: '没找到「从列表中添加/移除」' };
+    it.click();
+    const dlg = await waitFor(() => { const d = topDialog(); return d && d.querySelector('[role="checkbox"], input[type="checkbox"]') ? d : null; }, 6000);
+    if (!dlg) { closeLayer(); return { ok: false, msg: '列表窗口没打开' }; }
+    const on = [...dlg.querySelectorAll('[role="checkbox"][aria-checked="true"], input[type="checkbox"]:checked')];
+    for (const c of on) { c.click(); await delay(350); }
+    if (on.length) {
+      const save = byText(dlg, '[role="button"],button', TX.save);
+      if (!save) return { ok: false, msg: '取消了勾选，但没找到「保存」，请你点一下保存', el: dlg };
+      save.click();
+      await waitFor(() => !document.body.contains(dlg) || !vis(dlg), 5000);
+      return { ok: true, msg: `已从你的 ${on.length} 个列表中移除` };
+    }
+    closeLayer(); await delay(300);
+    return { ok: true, msg: '他不在你的任何列表里' };
+  }
+  async function stepBlock() {
+    if (isBlocked()) return { ok: true, msg: '之前已屏蔽' };
+    const it = await menuItem('block', TX.block);
+    if (!it) return { ok: false, msg: '菜单里没找到「屏蔽」' };
+    it.click();
+    const ok = await waitFor(() => document.querySelector('[data-testid="confirmationSheetConfirm"]'), 4000);
+    if (!ok) return { ok: false, msg: '屏蔽确认框没出现' };
+    ok.click();
+    return (await waitFor(isBlocked, 6000)) ? { ok: true, msg: '已屏蔽' } : { ok: false, msg: '点了屏蔽，但页面没显示「已屏蔽」' };
+  }
+  async function stepReport() {
+    const it = await menuItem('report', TX.report);
+    if (!it) return { ok: false, msg: '菜单里没找到「举报」' };
+    it.click();
+    let chose = false;
+    for (let i = 0; i < 6; i++) {
+      const dlg = await waitFor(topDialog, i ? 2500 : 6000);
+      if (!dlg) return chose ? { ok: true, msg: '已举报为垃圾信息' } : { ok: false, msg: '举报窗口没打开' };
+      const opt = byText(dlg, '[role="radio"],label,[role="option"],[role="button"]', TX.spam);
+      if (opt && !chose) { (opt.querySelector('input,[role="radio"]') || opt).click(); chose = true; await delay(400); }
+      const nx = dlg.querySelector('[data-testid="ChoiceSelectionNextButton"]') || byText(dlg, '[role="button"],button', TX.next);
+      if (!chose || !nx || nx.disabled || nx.getAttribute('aria-disabled') === 'true') {
+        return { ok: false, msg: chose ? '举报窗口还差一步，请你在窗口里点完' : '举报窗口里没找到「垃圾信息」，请你在窗口里选', el: dlg };
+      }
+      nx.click();
+      await delay(900);
+      if (!topDialog()) return { ok: true, msg: '已举报为垃圾信息' };
+    }
+    return { ok: false, msg: '举报窗口步骤比预期多，请你在窗口里点完', el: topDialog() };
+  }
+
+  async function clean(key, handle) {
+    if (job && job.kind === 'scan') { prog('正在扫描，扫完再处理。'); return; }
+    const name = handle.replace(/^@/, '');
+    if (!confirm(`对 @${name} 依次执行：\n1. 从你的列表中移除\n2. 屏蔽（会自动互相取关）\n3. 举报为垃圾信息\n\n只建议用在互关后又取关的营销号上。确定吗？`)) return;
+    if (job) job.stop = true;
+    const token = {};
+    job = { kind: 'clean', stop: false, token };
+    focus = { key, handle, state: 'clean', msg: '正在打开主页…' };
+    clearHl(); render();
+    await spaGo('/' + name);
+    const ready = await waitFor(() => {
+      const nb = mainCol() && mainCol().querySelector('[data-testid="UserName"]');
+      return nb && txt(nb).toLowerCase().includes('@' + name.toLowerCase()) && mainCol().querySelector('[data-testid="userActions"]');
+    }, 10000);
+    if (!job || job.token !== token) return;
+    if (!ready) { focus.msg = '主页没打开，请稍后再试'; job = null; render(); return; }
+    const out = [];
+    for (const [label, fn] of [['列表', stepLists], ['屏蔽', stepBlock], ['举报', stepReport]]) {
+      if (!job || job.token !== token || job.stop) return;
+      focus.msg = out.concat(`正在处理：${label}…`).join(' · '); render();
+      let r;
+      try { r = await fn(); } catch (e) { r = { ok: false, msg: label + '出错：' + (e && e.message || e) }; }
+      out.push((r.ok ? '✅ ' : '⚠️ ') + r.msg);
+      if (!r.ok) {
+        if (r.el) hl(r.el); else hl(mainCol() && mainCol().querySelector('[data-testid="userActions"]'));
+        focus.msg = out.join(' · ') + '<br>后面的步骤先停了，请你在页面上手动完成（已用红框标出）';
+        job = null; render(); return;
+      }
+      await delay(500);
+    }
+    await markDone(key, true, true);
+    focus.msg = out.join(' · ') + '<br><b>已全部完成</b>，已标记为已处理';
+    job = null; render();
+  }
+
   function nextTarget() {
     const list = rows().filter((r) => !r.done && (!focus || r.key !== focus.key));
     return list[0] || null;
@@ -487,7 +610,7 @@
   $('fab').onclick = () => { if (ui.open) { ui.open = false; $('panel').classList.remove('open'); } else openPanel(); };
   $('close').onclick = () => { ui.open = false; $('panel').classList.remove('open'); };
   $('scan').onclick = scan;
-  $('stop').onclick = () => { if (job) job.stop = true; if (job && job.kind === 'go') { job = null; focus = null; clearHl(); render(); } };
+  $('stop').onclick = () => { if (job) job.stop = true; if (job && (job.kind === 'go' || job.kind === 'clean')) { job = null; focus = null; clearHl(); render(); } };
   $('csv').onclick = exportCsv;
   $('next').onclick = () => { const n = nextTarget(); if (n) go(n.key, n.handle); else { focus = null; prog('这一页的人都处理完了。'); render(); } };
   $('q').oninput = (e) => { ui.q = e.target.value; render(); };
@@ -498,6 +621,7 @@
     if (!b) return;
     const row = b.closest('.row');
     if (b.dataset.a === 'go') go(row.dataset.k, row.dataset.h);
+    else if (b.dataset.a === 'clean') clean(row.dataset.k, row.dataset.h);
     else if (b.dataset.a === 'done') { await markDone(row.dataset.k); render(); }
   });
 
